@@ -74,6 +74,7 @@ Upstream's `.gitignore` ignores `/.claude/` and force-adds its skills. New files
 | 2026-10-15 | `client/src/routes/index.tsx`                  | Edit   | Mounts `PendoIdentity` in `AuthLayout`, which identifies the signed-in user on every sign-in path.                                           |
 | 2026-10-15 | `client/src/hooks/AuthContext.tsx`             | Edit   | `logout` calls `clearPendoSession()`, so the next sign-in is not tracked as the previous user.                                               |
 | 2026-10-16 | `git grep -l "FORK: Haiku 5.5"`                | Edit   | Claude Haiku 5.5 support, with tests in three new `haiku.spec.ts` files. Upstream sends `budget_tokens`, which the API rejects with a 400.   |
+| 2026-10-20 | `client/index.html`                            | Edit   | Points the install snippet at the new Novus app. The API key is the only change, so the snippet stays verbatim.                              |
 
 Upstream's `.nvmrc` (Node `24.16.0`, the current LTS line and the version the Dockerfile builds on) is used as is. Don't add a fork-specific one.
 
