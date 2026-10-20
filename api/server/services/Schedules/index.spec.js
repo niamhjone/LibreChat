@@ -5,6 +5,8 @@ const mockCreateSchedulesService = jest.fn(() => ({
 
 jest.mock('@librechat/api', () => ({
   createSchedulesService: (...args) => mockCreateSchedulesService(...args),
+  // FORK: the tracker for Pendo's `scheduled_run_completed`; no key, no tracker (FORK.md).
+  createPendoTracker: () => undefined,
 }));
 jest.mock('mongoose', () => ({ models: {} }));
 jest.mock('~/server/services/Config/app', () => ({ getAppConfig: jest.fn() }));

@@ -12,6 +12,7 @@ import { AgentTriggerServiceUnavailableError } from '../agents/triggers/service'
 import { AgentTriggerDeliveryError } from '../agents/triggers/delivery';
 import { computeNextRunAt, cadenceIntervalMinutes } from './cadence';
 import { resolveScheduleProjectId } from './types';
+import { reportScheduledRun } from './pendo';
 import { ScheduleMCPError } from './mcp';
 
 /** Consecutive balance skips (pre-fire or mid-generation) before auto-disable. */
@@ -383,6 +384,13 @@ export async function fireSchedule(
         logger.error(`[schedules] balance-skip bookkeeping failed for ${schedule.id}:`, skipError);
         return { fired: false, skipped: 'balance' as const };
       }
+      // FORK: Pendo `scheduled_run_completed` event. Attachments are not resolved yet.
+      reportScheduledRun(deps.trackEvent, {
+        schedule,
+        status: 'skipped_balance',
+        manual: options?.manual === true,
+        hasProject: chatProjectId != null,
+      });
       await advance();
       return { fired: false, skipped: 'balance' as const };
     }
@@ -614,6 +622,14 @@ export async function fireSchedule(
           );
           return { fired: false, skipped: 'overlap' as const };
         }
+        // FORK: Pendo `scheduled_run_completed` event (see FORK.md).
+        reportScheduledRun(deps.trackEvent, {
+          schedule,
+          status: 'skipped_overlap',
+          manual: options?.manual === true,
+          hasProject: chatProjectId != null,
+          droppedFileCount: droppedFileIds.length,
+        });
         await advance();
         return { fired: false, skipped: 'overlap' as const };
       }
@@ -649,7 +665,7 @@ export async function fireSchedule(
     }
 
     if (mcpFailure != null) {
-      await methods.recordRunOutcome({
+      const settledRun = await methods.recordRunOutcome({
         scheduleId: schedule.id,
         scheduledFor,
         status: 'error',
@@ -658,6 +674,15 @@ export async function fireSchedule(
         autoDisableAfterFailures: ownerLimits.autoDisableAfterFailures,
         clearConversationId: true,
       });
+      // FORK: Pendo `scheduled_run_completed` event, when this call settled the row.
+      if (settledRun != null) {
+        reportScheduledRun(deps.trackEvent, {
+          schedule,
+          run: settledRun,
+          manual: options?.manual === true,
+          droppedFileCount: droppedFileIds.length,
+        });
+      }
       await advance();
       return {
         fired: false,
@@ -728,13 +753,22 @@ export async function fireSchedule(
       }
       // Definite enqueue rejection: no durable delivery exists and nothing started.
       logger.error(`[schedules] trigger enqueue rejected for ${schedule.id}:`, error);
-      await methods.recordRunOutcome({
+      const settledRun = await methods.recordRunOutcome({
         scheduleId: schedule.id,
         scheduledFor,
         status: 'error',
         error: message,
         autoDisableAfterFailures: ownerLimits.autoDisableAfterFailures,
       });
+      // FORK: Pendo `scheduled_run_completed` event, when this call settled the row.
+      if (settledRun != null) {
+        reportScheduledRun(deps.trackEvent, {
+          schedule,
+          run: settledRun,
+          manual: options?.manual === true,
+          droppedFileCount: droppedFileIds.length,
+        });
+      }
       await advance();
       return { fired: false, error: message };
     }

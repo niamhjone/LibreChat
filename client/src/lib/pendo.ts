@@ -4,7 +4,8 @@
  * reach it; otherwise every call is a no-op.
  *
  * `tool_credentials_updated` and `endpoint_api_key_saved` are sent from shared React Query
- * hooks instead, through `packages/data-provider/src/react-query/pendo.ts`.
+ * hooks instead, through `packages/data-provider/src/react-query/pendo.ts`, and
+ * `scheduled_run_completed` from the server, through `packages/api/src/pendo.ts`.
  */
 import { parseLangChainErrorCode } from 'librechat-data-provider';
 import { extractJson } from '~/utils/json';
@@ -28,10 +29,12 @@ export type PendoTrackEvent =
   | 'chat_followup_queued'
   | 'file_uploaded'
   | 'file_upload_failed'
+  | 'files_deleted'
   | 'model_selected'
   | 'voice_input_transcribed'
   | 'code_block_executed'
   | 'artifact_downloaded'
+  | 'artifact_edit_saved'
   /* Conversations */
   | 'conversation_search_performed'
   | 'conversation_deleted'
@@ -71,11 +74,13 @@ export type PendoTrackEvent =
   | 'prompt_version_saved'
   | 'prompt_used'
   | 'prompt_deleted'
+  | 'prompt_library_searched'
   | 'skill_created'
   | 'skill_imported'
   | 'skill_updated'
   | 'skill_deleted'
   | 'skill_toggled'
+  | 'skill_library_searched'
   /* Memories */
   | 'memory_created'
   | 'memory_updated'
@@ -91,6 +96,7 @@ export type PendoTrackEvent =
   | 'endpoint_api_key_revoked'
   | 'langfuse_connection_saved'
   | 'code_environment_paired'
+  | 'code_environment_ready'
   /* Insights */
   | 'insights_report_viewed'
   /* Sharing and permissions */

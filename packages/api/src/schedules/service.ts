@@ -31,6 +31,7 @@ import type { AgentCheckpointGeneration } from '../agents/checkpointer';
 import type { ScheduleMCPExecution } from './authorization/execution';
 import type { BalanceUpdateFields } from '../types/balance';
 import type { GetAppConfigOptions } from '../app/service';
+import type { PendoTracker } from '../pendo';
 import {
   resolveScheduleProjectId,
   DEFAULT_SCHEDULE_LIMITS,
@@ -59,6 +60,7 @@ import { getBalanceConfig } from '../app/config';
 import { waitUntilDeadline } from '~/mcp/utils';
 import { startScheduleEngine } from './engine';
 import { withCapacitySlot } from './capacity';
+import { reportScheduledRun } from './pendo';
 import { isEnabled } from '../utils/common';
 
 /** Recordable terminal/paused run outcome, as accepted by `recordRunOutcome`. */
@@ -211,6 +213,9 @@ export interface SchedulesServiceDeps {
   /** Reads a durable trigger delivery by key from the merged agent-trigger service, for
    *  reconciliation's live-vs-dead delivery check. */
   getTriggerDelivery: ScheduleEngineDeps['getTriggerDelivery'];
+  /** FORK: sends the Pendo `scheduled_run_completed` event (`createPendoTracker`, see FORK.md);
+   *  absent, none is sent. */
+  trackEvent?: PendoTracker;
 }
 
 export interface SchedulesService {
@@ -809,6 +814,8 @@ export function createSchedulesService(
     },
     enqueueTrigger: deps.enqueueAgentTrigger,
     getTriggerDelivery: deps.getTriggerDelivery,
+    // FORK: the Pendo `scheduled_run_completed` event from the fire path (see FORK.md).
+    trackEvent: deps.trackEvent,
     runInTenantContext: (user, fn) =>
       tenantStorage.run({ tenantId: user.tenantId, userId: user.id }, fn),
     getJobStatus: async (conversationId) => {
@@ -1492,6 +1499,8 @@ export function createSchedulesService(
       if (!acknowledged?.admitted) return false;
       mcp = mergeReceipts(mcp, acknowledged.outcomes);
     }
+    // FORK: whether a Run now started it, for the Pendo `scheduled_run_completed` event.
+    let manual: boolean | undefined;
     if (streamId && jobCreatedAt != null) {
       try {
         const job = await GenerationJobManager.getJobStore()?.getJob(streamId);
@@ -1500,6 +1509,7 @@ export function createSchedulesService(
           job.scheduleId === scheduleId &&
           new Date(job.scheduledFor ?? '').getTime() === new Date(scheduledFor).getTime()
         ) {
+          manual = job.scheduleManual === true;
           mcp = mergeReceipts(
             mcp,
             readScheduleMCPReceipts(job.scheduleOutcomeError),
@@ -1603,7 +1613,7 @@ export function createSchedulesService(
         const schedule = await methods.getScheduleById(scheduleId);
         const owner = schedule ? await engineDeps.getUserContext(schedule.user) : null;
         const limits = await getLimits(owner ?? undefined);
-        await methods.recordRunOutcome({
+        const settledRun = await methods.recordRunOutcome({
           scheduleId,
           scheduledFor: new Date(scheduledFor),
           status: effectiveStatus,
@@ -1617,6 +1627,15 @@ export function createSchedulesService(
           autoDisableAfterFailures: limits.autoDisableAfterFailures,
           balanceSkipDisableThreshold: BALANCE_SKIP_DISABLE_THRESHOLD,
         });
+        // FORK: Pendo `scheduled_run_completed` event, once: a replay moves no row, gets null.
+        if (settledRun != null) {
+          reportScheduledRun(deps.trackEvent, {
+            schedule,
+            run: settledRun,
+            manual,
+            conversationId: clearConversationId ? undefined : conversationId,
+          });
+        }
         if (terminal && streamId && jobCreatedAt != null && !retiredPolicyGeneration) {
           try {
             const current = await GenerationJobManager.getJobStore()?.getJob(streamId);

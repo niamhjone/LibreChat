@@ -133,6 +133,8 @@ export { memoryDiagnostics } from './utils/memory';
 /* RUM */
 export * from './rum/proxy';
 export * from './rum/limiter';
+/* FORK: Pendo server-side Track Events, `scheduled_run_completed` (see FORK.md) */
+export * from './pendo';
 /* OpenAPI */
 export { createOpenApiRouter } from './openapi/router';
 export type { OpenApiRouterDeps } from './openapi/router';

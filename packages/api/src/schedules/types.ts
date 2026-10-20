@@ -9,6 +9,7 @@ import type { ScheduleMCPOutcome } from 'librechat-data-provider';
 import type { Types } from 'mongoose';
 import type { AgentTriggerEnqueueOptions, AgentTriggerEnvelope } from '../agents/triggers';
 import type { SlotClaimResult } from './capacity';
+import type { PendoTracker } from '../pendo';
 
 export interface ScheduleLimits {
   /** Feature-level switch: when false the engine claims/fires nothing. */
@@ -281,6 +282,8 @@ export interface ScheduleEngineDeps {
     cap: number,
     claim: (slot: number) => Promise<SlotClaimResult<T>>,
   ) => Promise<{ claimed: T } | 'capacity'>;
+  /** FORK: sends the Pendo `scheduled_run_completed` event (see FORK.md); absent, none is sent. */
+  trackEvent?: PendoTracker;
 }
 
 /** The immutable scheduled identity of a generation job, for reconcile/abort fencing. */

@@ -339,7 +339,11 @@ export type ScheduleMethods = {
   deleteSchedulesByUser: (userId: string | Types.ObjectId) => Promise<void>;
   getUnbookkeptRuns: (olderThan: Date, limit: number) => Promise<IScheduleRun[]>;
   finalizeBookkeeping: (params: RecordRunOutcomeParams) => Promise<void>;
-  recordRunOutcome: (params: RecordRunOutcomeParams) => Promise<void>;
+  /** FORK: resolves to the run row this call moved into its outcome (a pause returns its
+   *  pre-image with the new status), or null when no active row matched or a pause was only
+   *  re-affirmed. Lets a caller tell the transition from an idempotent replay, for the Pendo
+   *  `scheduled_run_completed` event (see FORK.md). */
+  recordRunOutcome: (params: RecordRunOutcomeParams) => Promise<IScheduleRun | null>;
   recordSkippedRun: (
     data: Partial<IScheduleRun> & {
       scheduleId: string;
@@ -1503,7 +1507,7 @@ export function createScheduleMethods(mongoose: typeof import('mongoose')): Sche
    * guarded row transition but walks the balance-skip streak instead of the failure
    * streak — the owner's credits, not the schedule, are at fault.
    */
-  async function recordRunOutcome(params: RecordRunOutcomeParams): Promise<void> {
+  async function recordRunOutcome(params: RecordRunOutcomeParams): Promise<IScheduleRun | null> {
     const firedAt = new Date();
     params = {
       ...params,
@@ -1566,7 +1570,7 @@ export function createScheduleMethods(mongoose: typeof import('mongoose')): Sche
       if (paused == null) {
         // A resume/denial fence is not authority to terminalize. The generation-aware
         // service owns denied-pause abort, provider drain and steer recovery.
-        return;
+        return null;
       }
       // Revision-fenced like the terminal path: an owner edit landing between the fire
       // and the approval must not have the OLD config's pause stamped on it. Without
@@ -1585,7 +1589,10 @@ export function createScheduleMethods(mongoose: typeof import('mongoose')): Sche
         params.scheduledFor,
         paused.configRevision != null ? { configRevision: paused.configRevision } : {},
       );
-      return;
+      // FORK: `paused` is the pre-image, so a pause it already held was only re-affirmed.
+      return paused.status === 'requires_action'
+        ? null
+        : { ...paused.toObject(), status: 'requires_action' };
     }
     // TERMINAL: flip the run row (match-guarded), then apply bookkeeping. `bookkept` is
     // set false at the flip and true only after bookkeeping lands, so a crash between is
@@ -1681,7 +1688,7 @@ export function createScheduleMethods(mongoose: typeof import('mongoose')): Sche
     }
     // No-match guard: never touch schedule bookkeeping without a matching run.
     if (settled == null) {
-      return;
+      return null;
     }
     // The post-image is the authoritative union, including receipts admitted just before this CAS.
     effectiveParams = { ...effectiveParams, mcp: settled.mcp };
@@ -1709,6 +1716,8 @@ export function createScheduleMethods(mongoose: typeof import('mongoose')): Sche
       { scheduleId: params.scheduleId, scheduledFor: params.scheduledFor },
       { $set: { bookkept: true } },
     );
+    // FORK: the post-image of the transition, for the Pendo `scheduled_run_completed` event.
+    return settled;
   }
 
   async function recordSkippedRun(

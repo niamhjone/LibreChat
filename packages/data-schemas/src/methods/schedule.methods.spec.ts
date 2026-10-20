@@ -976,6 +976,47 @@ describe('recordRunOutcome idempotency + crash-retry (bookkeeping)', () => {
     expect((await getRun(schedule.id, scheduledFor)).bookkept).toBe(true);
   });
 
+  // FORK: the transition is what the Pendo `scheduled_run_completed` event reports (FORK.md).
+  it('returns the row it settled, and null to a replay', async () => {
+    const schedule = await methods.createSchedule(scheduleData());
+    await methods.insertScheduleRun(runData(schedule, { scheduledFor }));
+    const outcome = {
+      scheduleId: schedule.id,
+      scheduledFor,
+      status: 'success' as const,
+      conversationId: 'convo-1',
+      autoDisableAfterFailures: 3,
+    };
+
+    const settled = await methods.recordRunOutcome(outcome);
+
+    expect(settled).toEqual(
+      expect.objectContaining({
+        scheduleId: schedule.id,
+        status: 'success',
+        conversationId: 'convo-1',
+      }),
+    );
+    expect(settled?.settledAt).toBeInstanceOf(Date);
+    await expect(methods.recordRunOutcome(outcome)).resolves.toBeNull();
+  });
+
+  it('returns a pause once, and null when it is only re-affirmed', async () => {
+    const schedule = await methods.createSchedule(scheduleData());
+    await methods.insertScheduleRun(runData(schedule, { scheduledFor }));
+    const pause = {
+      scheduleId: schedule.id,
+      scheduledFor,
+      status: 'requires_action' as const,
+      autoDisableAfterFailures: 3,
+    };
+
+    await expect(methods.recordRunOutcome(pause)).resolves.toEqual(
+      expect.objectContaining({ scheduleId: schedule.id, status: 'requires_action' }),
+    );
+    await expect(methods.recordRunOutcome(pause)).resolves.toBeNull();
+  });
+
   it('does not double-count a crashed later occurrence when an earlier one interleaves', async () => {
     const schedule = await methods.createSchedule(scheduleData());
     const t1 = new Date('2026-07-20T10:00:00Z');

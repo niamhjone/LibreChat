@@ -74,6 +74,8 @@ Upstream's `.gitignore` ignores `/.claude/` and force-adds its skills. New files
 | 2026-10-15 | `client/src/routes/index.tsx`                  | Edit   | Mounts `PendoIdentity` in `AuthLayout`, which identifies the signed-in user on every sign-in path.                                           |
 | 2026-10-15 | `client/src/hooks/AuthContext.tsx`             | Edit   | `logout` calls `clearPendoSession()`, so the next sign-in is not tracked as the previous user.                                               |
 | 2026-10-16 | `git grep -l "FORK: Haiku 5.5"`                | Edit   | Claude Haiku 5.5 support, with tests in three new `haiku.spec.ts` files. Upstream sends `budget_tokens`, which the API rejects with a 400.   |
+| 2026-10-20 | `packages/api/src/pendo.ts`                    | New    | Pendo Track Events from the server, for work no browser sees. Off unless `PENDO_INTEGRATION_KEY` is set; see "Pendo Track Events".           |
+| 2026-10-20 | `git grep -l "scheduled_run_completed"`        | Edit   | Server-side `scheduled_run_completed`. `recordRunOutcome` now returns the run row it moved, so a replayed settlement reports nothing.        |
 
 Upstream's `.nvmrc` (Node `24.16.0`, the current LTS line and the version the Dockerfile builds on) is used as is. Don't add a fork-specific one.
 
@@ -83,10 +85,20 @@ The client sends Pendo Track Events (`pendo.track`) for the product actions the 
 
 - `client/src/lib/pendo.ts` (new, tested by `client/src/lib/pendo.spec.ts`) lists every event name exactly as registered in Pendo (Pendo matches them verbatim, so never rename one) and wraps the agent: it never throws, drops unset properties, caps strings and trims trailing properties to Pendo's 512-byte limit, so call sites list their properties most important first.
 - `packages/data-provider/src/react-query/pendo.ts` (new) is the same guard for the two events sent from shared React Query hooks in `react-query-service.ts`, `tool_credentials_updated` and `endpoint_api_key_saved`.
-- Every other changed file is an upstream call site. Each call carries a `// FORK:` comment naming Pendo, so `grep -rln "FORK:" client/src packages/data-provider/src` lists the files and `grep -rn` the calls; the supporting edits (the `~/lib/pendo` import, callback parameters, hook dependency lists) sit next to them. `Nav/SettingsTabs/ApiKeys/Create.tsx` and `Nav/SettingsTabs/Data/ImportConversations.tsx` also carry the Tailwind class order and import order their formatters required once the files changed.
+- Every other changed file is an upstream call site. Each call carries a `// FORK:` comment naming Pendo, so `grep -rln "FORK:" client/src packages/data-provider/src` lists the files and `grep -rn` the calls; the supporting edits (the `~/lib/pendo` import, callback parameters, hook dependency lists) sit next to them. `Nav/SettingsTabs/ApiKeys/Create.tsx`, `Nav/SettingsTabs/Data/ImportConversations.tsx` and `Nav/Settings/CodeEnvironments.tsx` also carry the Tailwind class order and import order their formatters required once the files changed.
+- Events that depend on a settled request or a status change (a search's first page of results, a polled status turning `ready`, the first saved edit of an artifact) keep their "already reported" state at module scope, so a remount or a refetch does not report them again.
 - No event carries message or prompt text, file names, keys, tokens, email addresses or a share link's `shareId`.
 
 When a sync conflicts in one of those files, take upstream's version and re-apply the marked lines. A call that is dropped only loses its event.
+
+### Server-side Track Events
+
+`scheduled_run_completed` comes from the server, because scheduled runs happen with no browser open. `packages/api/src/pendo.ts` (new, tested by `pendo.spec.ts`) posts to Pendo's Track Event API with the same guards as the client, and never throws or holds up the caller. `api/server/services/Schedules/index.js` passes the tracker to the schedules service, which reports from `recordScheduleOutcome` and from the paths in `fire.ts` that end a run before it is sent (balance and overlap skips, an MCP preflight failure, a rejected enqueue), through `packages/api/src/schedules/pendo.ts`. The visitor is the schedule's owner and the account their tenant, as the client identifies them; single-tenant deployments send no account. `recordRunOutcome` (`packages/data-schemas`) returns the run row it moved, or null when a call only replayed one, so the many idempotent re-drives of a settlement report it once. Runs settled by reconciliation after a crash, or by schedule or account deletion, are not reported.
+
+Server-side events are off unless the `librechat` service has these variables:
+
+- `PENDO_INTEGRATION_KEY`: the Pendo integration key, a secret. Set it once by hand like the other secrets (`railway variable set`), never in source.
+- `PENDO_DATA_HOST` (optional): Pendo's data host. Defaults to `data.pendo-dev.pendo-dev.com`, the environment `client/index.html` loads the agent from.
 
 ## Deployment
 

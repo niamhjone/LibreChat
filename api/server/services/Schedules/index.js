@@ -11,7 +11,7 @@ function getService() {
     return service;
   }
   const mongoose = require('mongoose');
-  const { createSchedulesService } = require('@librechat/api');
+  const { createSchedulesService, createPendoTracker } = require('@librechat/api');
   const { getAppConfig } = require('~/server/services/Config/app');
   const {
     enqueueAgentTrigger,
@@ -51,6 +51,11 @@ function getService() {
     // Reuse the merged trigger/deletion admission fence. A schedule fire and every
     // generic trigger now fail closed on the same durable principal state.
     isUserDeleting,
+    // FORK: Pendo `scheduled_run_completed` events, off unless PENDO_INTEGRATION_KEY is set.
+    trackEvent: createPendoTracker({
+      integrationKey: process.env.PENDO_INTEGRATION_KEY,
+      dataHost: process.env.PENDO_DATA_HOST,
+    }),
   });
   return service;
 }

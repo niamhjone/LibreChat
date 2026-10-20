@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useRecoilValue } from 'recoil';
 import { Spinner } from '@librechat/client';
 import { useParams } from 'react-router-dom';
@@ -9,8 +9,13 @@ import { useSkillsInfiniteQuery } from '~/data-provider';
 import SkillListPanel from '../lists/SkillList';
 import { PanelContent } from '~/components/ui';
 import FilterSkills from './FilterSkills';
+import { pendo } from '~/lib/pendo';
 import { cn } from '~/utils';
 import store from '~/store';
+
+/** FORK: the last search reported to Pendo. Module scope, so a refetch or a further page of the
+ *  same search is not reported again; clearing the search resets it. */
+let lastTrackedSkillSearch: string | null = null;
 
 interface SkillsSidePanelProps {
   className?: string;
@@ -35,6 +40,25 @@ export default function SkillsSidePanel({ className }: SkillsSidePanelProps) {
 
   const lastPage = pages[pages.length - 1];
   const nextCursor = lastPage?.has_more === true ? lastPage.after : null;
+
+  useEffect(() => {
+    if (!debouncedSearch) {
+      lastTrackedSkillSearch = null;
+      return;
+    }
+    if (listQuery.isFetching || debouncedSearch === lastTrackedSkillSearch) {
+      return;
+    }
+    lastTrackedSkillSearch = debouncedSearch;
+    // FORK: Pendo track event, once the search's first page has settled. Zero results is a gap.
+    pendo.track('skill_library_searched', {
+      resultsCount: skills.length,
+      hasMoreResults: nextCursor != null,
+      queryLength: debouncedSearch.length,
+      isError: listQuery.isError,
+      searchQuery: debouncedSearch,
+    });
+  }, [debouncedSearch, listQuery.isFetching, listQuery.isError, skills.length, nextCursor]);
 
   /** A collapsed sidebar keeps this panel mounted, so stop draining pages into it */
   const sidebarExpanded = useRecoilValue(store.sidebarExpanded);

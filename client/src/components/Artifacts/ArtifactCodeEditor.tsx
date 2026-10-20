@@ -21,6 +21,7 @@ import {
 import { getResponseStatus } from '~/utils/errors';
 import { useArtifactsContext } from '~/Providers';
 import { useEditArtifact } from '~/data-provider';
+import { pendo } from '~/lib/pendo';
 
 /** Monaco's font size, in baseline pixels. */
 const EDITOR_FONT_SIZE = 13;
@@ -235,6 +236,10 @@ function isSameMutationTarget(target: ArtifactEditTarget, vars: ArtifactMutation
   return target.messageId === vars.messageId && target.index === vars.index;
 }
 
+/** FORK: saved edits already reported to Pendo, one per artifact and editing session. Module
+ *  scope, so the pane changing hosts (a remount) does not report the same edit again. */
+const trackedArtifactEdits = new Set<string>();
+
 export const ArtifactCodeEditor = function ArtifactCodeEditor({
   artifact,
   monacoRef,
@@ -288,6 +293,8 @@ export const ArtifactCodeEditor = function ArtifactCodeEditor({
    * to the text that was refused rather than to whatever is on screen when
    * the refusal lands. */
   const mutationArtifactIdRef = useRef<string | null>(null);
+  /* FORK: the artifact itself, which the Pendo `artifact_edit_saved` event describes. */
+  const mutationArtifactRef = useRef<Artifact | null>(null);
   /* The buffer this instance inherited at mount, and whether it has been
    * dealt with. It is the oldest text in play: anything the user types here
    * supersedes it, so both the drain and the queue consult these. */
@@ -301,7 +308,7 @@ export const ArtifactCodeEditor = function ArtifactCodeEditor({
       currentUpdateRef.current = vars.updated;
       setCurrentUpdate(vars.updated);
     },
-    onSuccess: (_data, vars) => {
+    onSuccess: (data, vars) => {
       currentUpdateRef.current = null;
       /* What the server now holds is true whoever is editing, so it is
        * recorded before the session check below. */
@@ -311,6 +318,22 @@ export const ArtifactCodeEditor = function ArtifactCodeEditor({
         vars.original,
         vars.updated,
       );
+      // FORK: Pendo track event, the first saved edit of each artifact per editing session.
+      // How much the text grew or shrank, never the text.
+      const edited = mutationArtifactRef.current ?? artifactRef.current;
+      const editKey = `${mutationSessionRef.current}:${edited.id}`;
+      if (!trackedArtifactEdits.has(editKey)) {
+        trackedArtifactEdits.add(editKey);
+        pendo.track('artifact_edit_saved', {
+          outcome: 'saved',
+          artifactType: edited.type,
+          language: edited.language,
+          lengthDelta: vars.updated.length - vars.original.length,
+          artifactIndex: vars.index,
+          messageId: vars.messageId,
+          conversationId: data.conversationId ?? undefined,
+        });
+      }
       /* A save that outlived its session reports to nobody: the buffer and any
        * queued edit belong to whoever is editing now. */
       if (isStaleSession()) {
@@ -341,6 +364,15 @@ export const ArtifactCodeEditor = function ArtifactCodeEditor({
     onError: (error) => {
       const attempted = currentUpdateRef.current;
       currentUpdateRef.current = null;
+      // FORK: Pendo track event, every refused (400) or failed save, whoever is editing now.
+      const failedArtifact = mutationArtifactRef.current ?? artifactRef.current;
+      const failedStatus = getResponseStatus(error);
+      pendo.track('artifact_edit_saved', {
+        outcome: failedStatus === 400 ? 'rejected' : 'error',
+        httpStatus: failedStatus,
+        artifactType: failedArtifact.type,
+        language: failedArtifact.language,
+      });
       if (isStaleSession()) {
         return;
       }
@@ -442,6 +474,8 @@ export const ArtifactCodeEditor = function ArtifactCodeEditor({
 
       mutationSessionRef.current = codeSession.current;
       mutationArtifactIdRef.current = target.artifactId;
+      // FORK: the artifact the Pendo `artifact_edit_saved` event describes.
+      mutationArtifactRef.current = art;
       setCurrentCodeRef.current(code, art.id);
       editArtifactRef.current.mutate({
         index: target.index,

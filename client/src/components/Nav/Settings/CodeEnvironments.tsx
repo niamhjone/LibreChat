@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { createCodeWorkerSetupCommand, isCodeWorkerShell } from 'librechat-data-provider';
 import {
   Button,
@@ -30,6 +30,7 @@ import {
   useUpdateCodeEnvironmentSettingsMutation,
 } from '~/data-provider';
 import { useLocalize } from '~/hooks';
+import { pendo } from '~/lib/pendo';
 
 const statusPresentation = {
   offline: { label: 'com_ui_code_environment_status_offline', tone: 'error' },
@@ -37,9 +38,45 @@ const statusPresentation = {
   ready: { label: 'com_ui_code_environment_status_ready', tone: 'success' },
 } as const;
 
-function EnvironmentStatus({ environmentId }: { environmentId: string }) {
+/** FORK: Pendo `code_environment_ready` state, at module scope so it outlives this settings
+ *  page: when each environment was paired in this page load, and those already reported. */
+const pairedAt = new Map<string, number>();
+const reportedReady = new Set<string>();
+
+function EnvironmentStatus({
+  environmentId,
+  environmentType,
+}: {
+  environmentId: string;
+  environmentType: TCodeEnvironmentSummary['type'];
+}) {
   const localize = useLocalize();
   const query = useCodeEnvironmentStatusQuery(environmentId);
+  const previousStatusRef = useRef(query.data?.status);
+  useEffect(() => {
+    const data = query.data;
+    const previous = previousStatusRef.current;
+    previousStatusRef.current = data?.status;
+    if (data?.status !== 'ready' || reportedReady.has(environmentId)) {
+      return;
+    }
+    /** Ready is news only after a status seen here was not, or for a pairing made in this page
+     *  load: an environment already ready when the page opened is not reported. */
+    const pairedAtMs = pairedAt.get(environmentId);
+    if (pairedAtMs == null && (previous == null || previous === 'ready')) {
+      return;
+    }
+    reportedReady.add(environmentId);
+    // FORK: Pendo track event, the first time a worker finishes pairing and connects.
+    pendo.track('code_environment_ready', {
+      environmentType,
+      statefulWorkspace: data.statefulWorkspace === true,
+      sandboxProfile: data.sandboxProfile,
+      runtimeCount: data.runtimes?.length ?? 0,
+      timeToReadyMs: pairedAtMs != null ? Date.now() - pairedAtMs : undefined,
+      environmentId,
+    });
+  }, [environmentId, environmentType, query.data]);
   if (query.isLoading) {
     return <Chip tone="neutral">{localize('com_ui_code_environment_status_checking')}</Chip>;
   }
@@ -51,7 +88,7 @@ function EnvironmentStatus({ environmentId }: { environmentId: string }) {
     <div className="flex min-w-0 flex-col items-end gap-1">
       <Chip tone={presentation.tone}>{localize(presentation.label)}</Chip>
       {query.data.sandboxProfile != null && (
-        <span className="max-w-48 truncate text-xs text-text-tertiary">
+        <span className="text-text-tertiary max-w-48 truncate text-xs">
           {[query.data.sandboxProfile, ...(query.data.runtimes ?? [])].join(' · ')}
         </span>
       )}
@@ -68,9 +105,9 @@ function WorkerCommand({ pairing }: { pairing: CodeEnvironmentPairingResponse['p
     allowWorkspaceCommands: true,
   });
   return (
-    <div className="flex flex-col gap-2 rounded-lg border border-border-medium bg-surface-secondary p-3">
+    <div className="border-border-medium bg-surface-secondary flex flex-col gap-2 rounded-lg border p-3">
       <div className="flex items-center justify-between gap-3">
-        <p className="text-sm font-medium text-text-primary">
+        <p className="text-text-primary text-sm font-medium">
           {localize('com_ui_code_environment_pairing_ready')}
         </p>
         <Select
@@ -95,10 +132,10 @@ function WorkerCommand({ pairing }: { pairing: CodeEnvironmentPairingResponse['p
           </SelectContent>
         </Select>
       </div>
-      <p className="text-xs text-text-secondary">
+      <p className="text-text-secondary text-xs">
         {localize('com_ui_code_environment_pairing_description')}
       </p>
-      <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded-md bg-surface-tertiary p-3 text-xs text-text-primary">
+      <pre className="bg-surface-tertiary text-text-primary overflow-x-auto rounded-md p-3 text-xs break-all whitespace-pre-wrap">
         {command}
       </pre>
       <Button
@@ -178,7 +215,7 @@ function EnvironmentPermissions({ environment }: { environment: TCodeEnvironment
   ].filter((control) => control.field != null);
 
   return (
-    <div className="mt-3 grid gap-3 border-t border-border-light pt-3 sm:grid-cols-2">
+    <div className="border-border-light mt-3 grid gap-3 border-t pt-3 sm:grid-cols-2">
       {controls.map(({ category, label, field }) => {
         if (field == null) return null;
         const value = effectivePermission(field, environment.settings?.permissions?.[category]);
@@ -237,6 +274,8 @@ export default function CodeEnvironments() {
       { name: trimmedName, controlPlaneId: selectedControlPlane },
       {
         onSuccess: (result) => {
+          // FORK: starts the clock of the Pendo `code_environment_ready` event.
+          pairedAt.set(result.environment.id, Date.now());
           setName('');
           setPairing(result.pairing);
           showToast({
@@ -254,18 +293,18 @@ export default function CodeEnvironments() {
   };
 
   let pairingControls = (
-    <p className="text-sm text-text-secondary">{localize('com_ui_code_environment_unavailable')}</p>
+    <p className="text-text-secondary text-sm">{localize('com_ui_code_environment_unavailable')}</p>
   );
   if (query.isLoading) {
     pairingControls = (
-      <div className="flex items-center gap-2 text-sm text-text-secondary">
+      <div className="text-text-secondary flex items-center gap-2 text-sm">
         <Spinner />
         {localize('com_ui_loading')}
       </div>
     );
   } else if (query.isError) {
     pairingControls = (
-      <p className="text-sm text-text-destructive">
+      <p className="text-text-destructive text-sm">
         {localize('com_ui_code_environment_load_error')}
       </p>
     );
@@ -302,7 +341,7 @@ export default function CodeEnvironments() {
     <div className="flex w-full flex-col gap-4">
       <div>
         <Label htmlFor="code-environment-name">{localize('com_ui_code_environments')}</Label>
-        <p className="mt-1 text-xs text-text-secondary">
+        <p className="text-text-secondary mt-1 text-xs">
           {localize('com_ui_code_environments_description')}
         </p>
       </div>
@@ -313,14 +352,18 @@ export default function CodeEnvironments() {
 
       <div className="flex flex-col gap-2">
         {(query.data?.environments ?? []).map((environment) => (
-          <div key={environment.id} className="rounded-lg border border-border-medium p-3">
+          <div key={environment.id} className="border-border-medium rounded-lg border p-3">
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
-                <p className="truncate text-sm font-medium text-text-primary">{environment.name}</p>
-                <p className="truncate text-xs text-text-secondary">{environment.id}</p>
+                <p className="text-text-primary truncate text-sm font-medium">{environment.name}</p>
+                <p className="text-text-secondary truncate text-xs">{environment.id}</p>
               </div>
               <div className="flex shrink-0 items-center gap-2">
-                <EnvironmentStatus environmentId={environment.id} />
+                {/* FORK: the type is for the Pendo `code_environment_ready` event. */}
+                <EnvironmentStatus
+                  environmentId={environment.id}
+                  environmentType={environment.type}
+                />
                 {environment.canDelete && (
                   <OGDialog>
                     <OGDialogTrigger asChild>
@@ -332,7 +375,7 @@ export default function CodeEnvironments() {
                       showCloseButton={false}
                       title={localize('com_ui_code_environment_remove_title')}
                       main={
-                        <p className="text-sm text-text-secondary">
+                        <p className="text-text-secondary text-sm">
                           {localize('com_ui_code_environment_remove_description')}
                         </p>
                       }
