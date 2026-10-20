@@ -19,7 +19,7 @@ import logger from '~/utils/logger';
  * The Pendo agent for `api/server/controllers/agents/client.js`, which runs every turn the
  * agents chat route admits: saved agents, and the ephemeral agent behind each model endpoint.
  */
-export const AGENT_ID = '4rLlQoGaNR786o-7Ief2BCJ12tI';
+export const AGENT_ID = 'okyDDuCBgMFneiBIim_Q0mqcwqs';
 
 type AgentEventType = 'prompt' | 'agent_response' | 'user_reaction';
 
