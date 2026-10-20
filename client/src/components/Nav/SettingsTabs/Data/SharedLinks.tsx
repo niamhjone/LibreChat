@@ -25,6 +25,7 @@ import { useDeleteSharedLinkMutation, useSharedLinksQuery } from '~/data-provide
 import { NotificationSeverity } from '~/common';
 import { useLocalize } from '~/hooks';
 import { formatDate } from '~/utils';
+import { pendo } from '~/lib/pendo';
 import store from '~/store';
 
 const PAGE_SIZE = 25;
@@ -37,6 +38,24 @@ const DEFAULT_PARAMS: SharedLinksListParams = {
 };
 
 type SharedLinkRow = SharedLinkItem & Record<string, unknown>;
+
+/** FORK: Pendo `shared_links_bulk_deleted` for a delete from this table. Counts only: a link's
+ *  `shareId` is its bearer token. */
+function trackSharedLinksDeleted(
+  outcome: 'success' | 'partial' | 'error',
+  selectedRows: SharedLinkItem[],
+  validRows: SharedLinkItem[],
+  deletedCount: number,
+) {
+  pendo.track('shared_links_bulk_deleted', {
+    outcome,
+    requestedCount: selectedRows.length,
+    deletedCount,
+    invalidCount: selectedRows.length - validRows.length,
+    isBulk: selectedRows.length > 1,
+    source: 'settings_shared_links',
+  });
+}
 
 export default function SharedLinks() {
   const localize = useLocalize();
@@ -147,11 +166,16 @@ export default function SharedLinks() {
         return;
       }
 
+      // FORK: how many links this delete revoked: the loop stops at the first failure.
+      let deletedCount = 0;
       try {
         for (const row of validRows) {
           await deleteMutation.mutateAsync({ shareId: row.shareId });
+          deletedCount += 1;
         }
 
+        // FORK: Pendo track event.
+        trackSharedLinksDeleted('success', selectedRows, validRows, deletedCount);
         showToast({
           message: localize(
             validRows.length === 1
@@ -162,6 +186,13 @@ export default function SharedLinks() {
         });
       } catch (error) {
         console.error('Failed to delete shared links:', error);
+        // FORK: Pendo track event.
+        trackSharedLinksDeleted(
+          deletedCount > 0 ? 'partial' : 'error',
+          selectedRows,
+          validRows,
+          deletedCount,
+        );
         showToast({
           message: localize('com_ui_bulk_delete_error'),
           severity: NotificationSeverity.ERROR,

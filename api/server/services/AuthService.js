@@ -447,7 +447,19 @@ const registerUser = async (user, additionalData = {}) => {
     /** `userCreated` separates this from the identical 200 returned when the email is
      * already in use, so a caller can act on an account having actually been created
      * without the response body revealing which of the two happened. */
-    return { status: 200, message: genericVerificationMessage, userCreated: true };
+    return {
+      status: 200,
+      message: genericVerificationMessage,
+      userCreated: true,
+      // FORK: for the Pendo `user_account_created` event; see registrationController.
+      createdUser: {
+        id: newUserId?.toString(),
+        role: newUserData.role,
+        provider: newUserData.provider,
+        tenantId: newUser.tenantId,
+        emailVerificationRequired: emailEnabled && !newUser.emailVerified,
+      },
+    };
   } catch (err) {
     logger.error('[registerUser] Error in registering user:', err);
     if (newUserId) {

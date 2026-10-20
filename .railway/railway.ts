@@ -51,6 +51,8 @@ export default defineRailway(() => {
       JWT_REFRESH_SECRET: preserve(),
       CREDS_KEY: preserve(),
       CREDS_IV: preserve(),
+      // Pendo's track event shared secret. Optional: without it the server sends no Track Events.
+      PENDO_TRACK_EVENT_SECRET: preserve(),
     },
   });
 

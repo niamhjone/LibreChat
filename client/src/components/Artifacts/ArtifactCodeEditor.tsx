@@ -21,9 +21,15 @@ import {
 import { getResponseStatus } from '~/utils/errors';
 import { useArtifactsContext } from '~/Providers';
 import { useEditArtifact } from '~/data-provider';
+import { pendo } from '~/lib/pendo';
 
 /** Monaco's font size, in baseline pixels. */
 const EDITOR_FONT_SIZE = 13;
+
+/** FORK: artifact edits already reported to Pendo, keyed by a provider's `codeSession` object,
+ *  then by session, artifact and outcome. Module scope, because the editor remounts whenever the
+ *  pane changes hosts within one editing session. */
+const reportedEdits = new WeakMap<object, Set<string>>();
 
 const LANG_MAP: Record<string, string> = {
   javascript: 'javascript',
@@ -294,6 +300,27 @@ export const ArtifactCodeEditor = function ArtifactCodeEditor({
   const inheritedBufferRef = useRef<string | null>(restoredCode ?? null);
   const drainedBufferRef = useRef<string | null>(null);
   const isStaleSession = () => codeSession.current !== mutationSessionRef.current;
+  /** FORK: Pendo `artifact_edit_saved`, once per artifact and outcome in an editing session
+   *  rather than once per debounced save. Lengths only, never the code. */
+  const trackEditSaved = (outcome: 'saved' | 'rejected', vars?: ArtifactMutationVars) => {
+    const artifactId = mutationArtifactIdRef.current ?? artifactRef.current.id;
+    const key = `${mutationSessionRef.current}:${artifactId}:${outcome}`;
+    const reported = reportedEdits.get(codeSession) ?? new Set<string>();
+    if (vars == null || reported.has(key)) {
+      return;
+    }
+    reported.add(key);
+    reportedEdits.set(codeSession, reported);
+    const saved = artifactRef.current.id === artifactId ? artifactRef.current : undefined;
+    pendo.track('artifact_edit_saved', {
+      outcome,
+      artifactType: saved?.type,
+      language: saved?.language,
+      updatedLength: vars.updated.length,
+      sizeDeltaChars: vars.updated.length - vars.original.length,
+      messageId: vars.messageId,
+    });
+  };
 
   const editArtifact = useEditArtifact({
     onMutate: (vars) => {
@@ -311,6 +338,8 @@ export const ArtifactCodeEditor = function ArtifactCodeEditor({
         vars.original,
         vars.updated,
       );
+      // FORK: Pendo track event, before the session check for the same reason.
+      trackEditSaved('saved', vars);
       /* A save that outlived its session reports to nobody: the buffer and any
        * queued edit belong to whoever is editing now. */
       if (isStaleSession()) {
@@ -338,9 +367,13 @@ export const ArtifactCodeEditor = function ArtifactCodeEditor({
         runMutationRef.current(pending.code, original);
       }
     },
-    onError: (error) => {
+    onError: (error, vars) => {
       const attempted = currentUpdateRef.current;
       currentUpdateRef.current = null;
+      // FORK: Pendo track event for an edit the server refused, whoever is editing now.
+      if (getResponseStatus(error) === 400) {
+        trackEditSaved('rejected', vars);
+      }
       if (isStaleSession()) {
         return;
       }

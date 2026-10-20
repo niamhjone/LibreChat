@@ -27,11 +27,16 @@ import {
   useIsMessagesViewReadOnly,
   useMCPAppsPolicy,
 } from '~/Providers';
+import { pendo } from '~/lib/pendo';
 import { logger } from '~/utils';
 
 type MessageContentBlock = { type?: string; text?: string };
 
 type SizeParams = { width?: number; height?: number };
+
+/** FORK: how an App-requested action ended, for the Pendo `mcp_app_action_completed` event:
+ *  refused before the user was asked, declined, carried out, or failed once approved. */
+type AppActionOutcome = 'blocked' | 'denied' | 'completed' | 'failed';
 
 type ResolvedResource = {
   html: string;
@@ -289,12 +294,59 @@ export function useAppBridge({
       }
     };
 
+    /** FORK: Pendo `mcp_app_action_completed` for a tool call or message this App requested.
+     *  Identifiers and lengths only, never the arguments or text. A refusal is reported once per
+     *  kind, tool and outcome, so an App retrying in a loop cannot flood the event. */
+    const reportedRefusals = new Set<string>();
+    const trackAppAction = (
+      outcome: AppActionOutcome,
+      action: {
+        kind: MCPAppAction['kind'];
+        toolName?: string;
+        argumentsLength?: number;
+        approved?: boolean;
+        isError: boolean;
+      },
+    ) => {
+      if (outcome === 'blocked' || outcome === 'denied') {
+        const key = `${action.kind}:${action.toolName ?? ''}:${outcome}`;
+        if (reportedRefusals.has(key)) {
+          return;
+        }
+        reportedRefusals.add(key);
+      }
+      pendo.track('mcp_app_action_completed', {
+        actionKind: action.kind,
+        outcome,
+        approved: action.approved,
+        isError: action.isError,
+        serverName,
+        toolName: action.toolName,
+        appToolName: resource.toolName,
+        argumentsLength: action.argumentsLength,
+        surface: 'mcp_app',
+      });
+    };
+
     // Host-bound actions (tool calls, resource reads/lists, model messages) run with the viewer's
     // auth, so they are only wired in interactive views, never in shared transcripts or /search.
     if (interactive) {
       bridge.oncalltool = async (params, { signal }) => {
-        if (signal.aborted || viewAbort.signal.aborted || cancelled || !requestActionRef.current)
+        /** FORK: answers a tool call the host refused or that failed, once Pendo has it. */
+        const toolError = (
+          outcome: AppActionOutcome,
+          details: { argumentsLength?: number; approved?: boolean } = {},
+        ) => {
+          trackAppAction(outcome, {
+            kind: 'tool',
+            toolName: params.name,
+            isError: true,
+            ...details,
+          });
           return { content: [], isError: true };
+        };
+        if (signal.aborted || viewAbort.signal.aborted || cancelled || !requestActionRef.current)
+          return toolError('blocked');
         // Snapshot the arguments shown to the user: the App must not mutate them while waiting.
         let argumentsText: string;
         let args: Record<string, unknown>;
@@ -305,25 +357,44 @@ export function useAppBridge({
             argumentsText.length >
               (maxActionPreviewCharsRef.current ?? DEFAULT_MCP_APP_ACTION_PREVIEW_CHARS)
           )
-            return { content: [], isError: true };
+            return toolError('blocked', { argumentsLength: argumentsText?.length });
           args = JSON.parse(argumentsText) as Record<string, unknown>;
           if (!args || typeof args !== 'object' || Array.isArray(args))
-            return { content: [], isError: true };
+            return toolError('blocked', { argumentsLength: argumentsText.length });
         } catch {
-          return { content: [], isError: true };
+          return toolError('blocked');
         }
         const toolName = params.name;
+        const argumentsLength = argumentsText.length;
+        let approved: boolean | undefined;
         try {
           const actionSignal = AbortSignal.any([signal, viewAbort.signal]);
           const allowed = await requestActionRef.current(
             { kind: 'tool', serverName, toolName, argumentsText },
             actionSignal,
           );
-          if (!allowed || actionSignal.aborted || cancelled) return { content: [], isError: true };
-          return await callMCPAppTool(serverName, serverBinding, toolName, args, actionSignal);
+          approved = allowed;
+          if (!allowed || actionSignal.aborted || cancelled)
+            return toolError(allowed ? 'blocked' : 'denied', { argumentsLength, approved });
+          const result = await callMCPAppTool(
+            serverName,
+            serverBinding,
+            toolName,
+            args,
+            actionSignal,
+          );
+          // FORK: Pendo track event. `isError` is the tool's own verdict.
+          trackAppAction('completed', {
+            kind: 'tool',
+            toolName,
+            argumentsLength,
+            approved,
+            isError: result.isError === true,
+          });
+          return result;
         } catch (error) {
           logger.error('[MCP App] Tool action failed', error);
-          return { content: [], isError: true };
+          return toolError('failed', { argumentsLength, approved });
         }
       };
 
@@ -346,6 +417,16 @@ export function useAppBridge({
           .filter((block) => block.type === 'text' && typeof block.text === 'string')
           .map((block) => block.text)
           .join('\n');
+        /** FORK: answers a message the host refused or that failed, once Pendo has it. */
+        const messageError = (outcome: AppActionOutcome, approved?: boolean) => {
+          trackAppAction(outcome, {
+            kind: 'message',
+            argumentsLength: text.length,
+            approved,
+            isError: true,
+          });
+          return { isError: true };
+        };
         if (
           !text.trim() ||
           text.length >
@@ -355,7 +436,7 @@ export function useAppBridge({
           cancelled ||
           !requestActionRef.current
         ) {
-          return { isError: true };
+          return messageError('blocked');
         }
         try {
           const actionSignal = AbortSignal.any([signal, viewAbort.signal]);
@@ -363,7 +444,8 @@ export function useAppBridge({
             { kind: 'message', serverName, text },
             actionSignal,
           );
-          if (!allowed || actionSignal.aborted || cancelled) return { isError: true };
+          if (!allowed || actionSignal.aborted || cancelled)
+            return messageError(allowed ? 'blocked' : 'denied', allowed);
           // The selected agent and MCP servers belong to the conversation. Only the
           // next composer's staged files, manual skill picks, quotes and reasoning
           // level are excluded.
@@ -377,14 +459,21 @@ export function useAppBridge({
             },
           );
           if (accepted === false) {
-            return { isError: true };
+            return messageError('failed', true);
           }
+          // FORK: Pendo track event. The turn also reads as a `new` send in `chat_message_sent`.
+          trackAppAction('completed', {
+            kind: 'message',
+            argumentsLength: text.length,
+            approved: true,
+            isError: false,
+          });
           // ask accepted the turn synchronously. A later App abort cannot undo it;
           // claiming failure here encourages the App to retry and duplicate the turn.
           return {};
         } catch (error) {
           logger.error('[MCP App] Failed to deliver message', error);
-          return { isError: true };
+          return messageError('failed');
         }
       };
     }

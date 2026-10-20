@@ -30,6 +30,7 @@ import {
   useUpdateCodeEnvironmentSettingsMutation,
 } from '~/data-provider';
 import { useLocalize } from '~/hooks';
+import { pendo } from '~/lib/pendo';
 
 const statusPresentation = {
   offline: { label: 'com_ui_code_environment_status_offline', tone: 'error' },
@@ -37,9 +38,35 @@ const statusPresentation = {
   ready: { label: 'com_ui_code_environment_status_ready', tone: 'success' },
 } as const;
 
+/** FORK: environments paired in this tab whose worker has not connected yet, for the Pendo
+ *  `code_environment_connected` event. Module scope, so closing and reopening Settings keeps
+ *  them; each entry is removed when its first `ready` status is reported. */
+const awaitingConnection = new Map<
+  string,
+  { environmentType: string; controlPlaneId: string; pairedAt: number }
+>();
+
 function EnvironmentStatus({ environmentId }: { environmentId: string }) {
   const localize = useLocalize();
   const query = useCodeEnvironmentStatusQuery(environmentId);
+  // FORK: Pendo track event, once: the worker connected to an environment this tab paired.
+  useEffect(() => {
+    const paired = awaitingConnection.get(environmentId);
+    const data = query.data;
+    if (paired == null || data?.status !== 'ready') {
+      return;
+    }
+    awaitingConnection.delete(environmentId);
+    pendo.track('code_environment_connected', {
+      environmentId,
+      environmentType: paired.environmentType,
+      controlPlaneId: paired.controlPlaneId,
+      secondsToConnect: Math.round((Date.now() - paired.pairedAt) / 1000),
+      sandboxProfile: data.sandboxProfile,
+      runtimeCount: data.runtimes?.length,
+      statefulWorkspace: data.statefulWorkspace,
+    });
+  }, [environmentId, query.data]);
   if (query.isLoading) {
     return <Chip tone="neutral">{localize('com_ui_code_environment_status_checking')}</Chip>;
   }
@@ -237,6 +264,12 @@ export default function CodeEnvironments() {
       { name: trimmedName, controlPlaneId: selectedControlPlane },
       {
         onSuccess: (result) => {
+          // FORK: awaited by the Pendo `code_environment_connected` event in EnvironmentStatus.
+          awaitingConnection.set(result.environment.id, {
+            environmentType: result.environment.type,
+            controlPlaneId: selectedControlPlane,
+            pairedAt: Date.now(),
+          });
           setName('');
           setPairing(result.pairing);
           showToast({

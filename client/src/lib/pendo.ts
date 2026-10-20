@@ -4,7 +4,9 @@
  * reach it; otherwise every call is a no-op.
  *
  * `tool_credentials_updated` and `endpoint_api_key_saved` are sent from shared React Query
- * hooks instead, through `packages/data-provider/src/react-query/pendo.ts`.
+ * hooks instead, through `packages/data-provider/src/react-query/pendo.ts`. The outcomes no
+ * browser observes (`scheduled_run_completed`, `user_account_created` and
+ * `agent_api_key_first_used`) are sent by the server, through `packages/api/src/pendo`.
  */
 import { parseLangChainErrorCode } from 'librechat-data-provider';
 import { extractJson } from '~/utils/json';
@@ -28,10 +30,12 @@ export type PendoTrackEvent =
   | 'chat_followup_queued'
   | 'file_uploaded'
   | 'file_upload_failed'
+  | 'files_bulk_deleted'
   | 'model_selected'
   | 'voice_input_transcribed'
   | 'code_block_executed'
   | 'artifact_downloaded'
+  | 'artifact_edit_saved'
   /* Conversations */
   | 'conversation_search_performed'
   | 'conversation_deleted'
@@ -88,15 +92,18 @@ export type PendoTrackEvent =
   | 'mcp_server_deleted'
   | 'mcp_server_connected'
   | 'mcp_server_connection_failed'
+  | 'mcp_app_action_completed'
   | 'endpoint_api_key_revoked'
   | 'langfuse_connection_saved'
   | 'code_environment_paired'
+  | 'code_environment_connected'
   /* Insights */
   | 'insights_report_viewed'
   /* Sharing and permissions */
   | 'shared_link_created'
   | 'shared_link_updated'
   | 'shared_link_deleted'
+  | 'shared_links_bulk_deleted'
   | 'shared_conversation_forked'
   | 'resource_permissions_updated'
   | 'role_permissions_updated'

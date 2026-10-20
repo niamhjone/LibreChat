@@ -55,6 +55,7 @@ import { getAppConfigOptionsFromUser } from '../app/service';
 import { OboTokenResolutionError } from '../mcp/oauth/obo';
 import { ScheduledMCPBearerError } from '../mcp/errors';
 import { startScheduleErasureSweep } from './erasure';
+import { withScheduleRunTracking } from '~/pendo';
 import { getBalanceConfig } from '../app/config';
 import { waitUntilDeadline } from '~/mcp/utils';
 import { startScheduleEngine } from './engine';
@@ -575,7 +576,8 @@ export function createSchedulesService(
   deps: SchedulesServiceDeps,
   timings?: ScheduleServiceTimings,
 ): SchedulesService {
-  const { methods } = deps;
+  // FORK: Pendo `scheduled_run_completed`, once per occurrence any settlement path records.
+  const methods = withScheduleRunTracking(deps.methods);
 
   // Recovery evidence only: no authorization or bearer is cached here.
   const pendingBearerFailures = new Map<

@@ -11,11 +11,19 @@ import logger from '~/config/winston';
 const API_KEY_PREFIX = 'sk-';
 const API_KEY_LENGTH = 32;
 
+/** A valid key's owner and id. FORK: plus whether this request claimed the key's first use,
+ *  and its creation and expiry, for the Pendo `agent_api_key_first_used` event. */
+export type AgentApiKeyValidation = {
+  userId: Types.ObjectId;
+  keyId: Types.ObjectId;
+  firstUse: boolean;
+  createdAt?: Date;
+  expiresAt?: Date;
+};
+
 export function createAgentApiKeyMethods(mongoose: typeof import('mongoose')): {
   createAgentApiKey: (data: AgentApiKeyCreateData) => Promise<AgentApiKeyCreateResult>;
-  validateAgentApiKey: (
-    apiKey: string,
-  ) => Promise<{ userId: Types.ObjectId; keyId: Types.ObjectId } | null>;
+  validateAgentApiKey: (apiKey: string) => Promise<AgentApiKeyValidation | null>;
   listAgentApiKeys: (userId: string | Types.ObjectId) => Promise<AgentApiKeyListItem[]>;
   deleteAgentApiKey: (
     keyId: string | Types.ObjectId,
@@ -62,9 +70,26 @@ export function createAgentApiKeyMethods(mongoose: typeof import('mongoose')): {
     }
   }
 
-  async function validateAgentApiKey(
-    apiKey: string,
-  ): Promise<{ userId: Types.ObjectId; keyId: Types.ObjectId } | null> {
+  /**
+   * FORK: claims a key's first use by setting `lastUsedAt` only while it is still unset, so one
+   * of any concurrent first requests reports it (the Pendo `agent_api_key_first_used` event). A
+   * failed write reads as not first rather than failing the request.
+   */
+  async function claimFirstUse(keyId: Types.ObjectId): Promise<boolean> {
+    try {
+      const AgentApiKey = mongoose.models.AgentApiKey;
+      const result = await AgentApiKey.updateOne(
+        { _id: keyId, lastUsedAt: null },
+        { $set: { lastUsedAt: new Date() } },
+      );
+      return result.modifiedCount === 1;
+    } catch (error) {
+      logger.error('[validateAgentApiKey] Error claiming first use:', error);
+      return false;
+    }
+  }
+
+  async function validateAgentApiKey(apiKey: string): Promise<AgentApiKeyValidation | null> {
     try {
       const AgentApiKey = mongoose.models.AgentApiKey;
       const keyHash = await hashToken(apiKey);
@@ -79,6 +104,10 @@ export function createAgentApiKeyMethods(mongoose: typeof import('mongoose')): {
         return null;
       }
 
+      // FORK: Pendo `agent_api_key_first_used`; see claimFirstUse.
+      const firstUse =
+        keyDoc.lastUsedAt == null && (await claimFirstUse(keyDoc._id as Types.ObjectId));
+
       AgentApiKey.updateOne({ _id: keyDoc._id }, { $set: { lastUsedAt: new Date() } }).catch(
         (error: unknown) => {
           logger.error('[validateAgentApiKey] Error updating lastUsedAt:', error);
@@ -88,6 +117,9 @@ export function createAgentApiKeyMethods(mongoose: typeof import('mongoose')): {
       return {
         userId: keyDoc.userId,
         keyId: keyDoc._id as Types.ObjectId,
+        firstUse,
+        createdAt: keyDoc.createdAt,
+        expiresAt: keyDoc.expiresAt,
       };
     } catch (error) {
       logger.error('[validateAgentApiKey] Error validating API key:', error);

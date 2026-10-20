@@ -10,11 +10,16 @@ import type { IUser } from '@librechat/data-schemas';
 import type { Types } from 'mongoose';
 import { isTwoFactorEnrollmentRequired } from '~/auth/twoFactor';
 import { getRemoteAgentPermissions } from './service';
+import { trackAgentApiKeyFirstUsed } from '~/pendo';
 
 export interface ApiKeyAuthDependencies {
   validateAgentApiKey: (apiKey: string) => Promise<{
     userId: Types.ObjectId;
     keyId: Types.ObjectId;
+    /** FORK: for the Pendo `agent_api_key_first_used` event; see `validateAgentApiKey`. */
+    firstUse?: boolean;
+    createdAt?: Date;
+    expiresAt?: Date;
   } | null>;
   findUser: (query: { _id: string | Types.ObjectId }) => Promise<IUser | null>;
   isPrincipalActive: (userId: string) => Promise<boolean>;
@@ -126,6 +131,8 @@ export function createRequireApiKeyAuth(deps: ApiKeyAuthDependencies) {
       }
       req.user = user as IUser & { id: string };
       req.apiKeyId = keyValidation.keyId;
+      // FORK: Pendo track event, sent only for the key's first successful authentication.
+      trackAgentApiKeyFirstUsed(req, keyValidation);
 
       next();
     } catch (error) {

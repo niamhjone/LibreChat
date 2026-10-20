@@ -18,6 +18,7 @@ const {
   isTokenRetired,
   isTwoFactorEnrollmentRequired,
   sanitizeUserForAuthResponse,
+  trackUserAccountCreated,
 } = require('@librechat/api');
 const {
   requestPasswordReset,
@@ -81,6 +82,8 @@ const registrationController = async (req, res) => {
         logger.error('[registrationController] Failed to consume invite after registration', error);
       }
     }
+    // FORK: Pendo track event, sent only when this request created the account.
+    trackUserAccountCreated(response, { hasInviteToken: req.invite?.token != null });
     res.status(status).send({ message });
   } catch (err) {
     logger.error('[registrationController]', err);

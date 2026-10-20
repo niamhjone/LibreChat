@@ -1,6 +1,7 @@
 import React from 'react';
 import type { UIActionResult } from '@mcp-ui/client';
 import type { TAskFunction } from '~/common';
+import { pendo } from '~/lib/pendo';
 import logger from './logger';
 
 export * from './map';
@@ -186,6 +187,14 @@ Execute the intention of the prompt that is mentioned in the message using the t
   }
 
   logger.debug('MCP-UI', 'About to submit message:', messageText);
-  ask({ text: messageText });
+  const accepted = ask({ text: messageText });
+  // FORK: Pendo track event. The action's kind and tool only, never its params or prompt.
+  pendo.track('mcp_app_action_completed', {
+    actionKind: type,
+    outcome: accepted === false ? 'failed' : 'completed',
+    isError: accepted === false,
+    toolName: type === 'tool' ? payload.toolName : undefined,
+    surface: 'mcp_ui',
+  });
   logger.debug('MCP-UI', 'Message submitted successfully');
 };

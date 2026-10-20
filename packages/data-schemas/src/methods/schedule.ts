@@ -339,7 +339,10 @@ export type ScheduleMethods = {
   deleteSchedulesByUser: (userId: string | Types.ObjectId) => Promise<void>;
   getUnbookkeptRuns: (olderThan: Date, limit: number) => Promise<IScheduleRun[]>;
   finalizeBookkeeping: (params: RecordRunOutcomeParams) => Promise<void>;
-  recordRunOutcome: (params: RecordRunOutcomeParams) => Promise<void>;
+  /** FORK: resolves to the run this call settled, or null when it settled nothing (a pause, or
+   *  an occurrence already settled), so a caller can act once per outcome (Pendo). */
+  recordRunOutcome: (params: RecordRunOutcomeParams) => Promise<IScheduleRun | null>;
+  /** FORK: resolves to the run this call recorded, or null for a retry of a recorded skip. */
   recordSkippedRun: (
     data: Partial<IScheduleRun> & {
       scheduleId: string;
@@ -347,7 +350,7 @@ export type ScheduleMethods = {
       status: Extract<ScheduleRunStatus, 'skipped_overlap' | 'skipped_balance'>;
     },
     balanceSkipDisableThreshold?: number,
-  ) => Promise<void>;
+  ) => Promise<IScheduleRun | null>;
   getRunsForReconciliation: (olderThan: Date, limit: number) => Promise<IScheduleRun[]>;
   markRunsReconciled: (runs: Array<Pick<IScheduleRun, '_id'>>) => Promise<void>;
 };
@@ -1503,7 +1506,7 @@ export function createScheduleMethods(mongoose: typeof import('mongoose')): Sche
    * guarded row transition but walks the balance-skip streak instead of the failure
    * streak — the owner's credits, not the schedule, are at fault.
    */
-  async function recordRunOutcome(params: RecordRunOutcomeParams): Promise<void> {
+  async function recordRunOutcome(params: RecordRunOutcomeParams): Promise<IScheduleRun | null> {
     const firedAt = new Date();
     params = {
       ...params,
@@ -1566,7 +1569,7 @@ export function createScheduleMethods(mongoose: typeof import('mongoose')): Sche
       if (paused == null) {
         // A resume/denial fence is not authority to terminalize. The generation-aware
         // service owns denied-pause abort, provider drain and steer recovery.
-        return;
+        return null;
       }
       // Revision-fenced like the terminal path: an owner edit landing between the fire
       // and the approval must not have the OLD config's pause stamped on it. Without
@@ -1585,7 +1588,7 @@ export function createScheduleMethods(mongoose: typeof import('mongoose')): Sche
         params.scheduledFor,
         paused.configRevision != null ? { configRevision: paused.configRevision } : {},
       );
-      return;
+      return null;
     }
     // TERMINAL: flip the run row (match-guarded), then apply bookkeeping. `bookkept` is
     // set false at the flip and true only after bookkeeping lands, so a crash between is
@@ -1681,7 +1684,7 @@ export function createScheduleMethods(mongoose: typeof import('mongoose')): Sche
     }
     // No-match guard: never touch schedule bookkeeping without a matching run.
     if (settled == null) {
-      return;
+      return null;
     }
     // The post-image is the authoritative union, including receipts admitted just before this CAS.
     effectiveParams = { ...effectiveParams, mcp: settled.mcp };
@@ -1709,6 +1712,8 @@ export function createScheduleMethods(mongoose: typeof import('mongoose')): Sche
       { scheduleId: params.scheduleId, scheduledFor: params.scheduledFor },
       { $set: { bookkept: true } },
     );
+    // FORK: only the call that won the transition gets the run (see ScheduleMethods).
+    return settled;
   }
 
   async function recordSkippedRun(
@@ -1718,7 +1723,7 @@ export function createScheduleMethods(mongoose: typeof import('mongoose')): Sche
       status: Extract<ScheduleRunStatus, 'skipped_overlap' | 'skipped_balance'>;
     },
     balanceSkipDisableThreshold?: number,
-  ): Promise<void> {
+  ): Promise<IScheduleRun | null> {
     const firedAt = new Date();
     // A duplicate {scheduleId, scheduledFor} row means a prior attempt inserted it.
     // Proceed as a retry ONLY when that row is the SAME skip — otherwise this claim
@@ -1745,7 +1750,7 @@ export function createScheduleMethods(mongoose: typeof import('mongoose')): Sche
         .select('status configRevision firedAt')
         .lean<Pick<IScheduleRun, 'status' | 'configRevision' | 'firedAt'>>();
       if (existing == null || existing.status !== data.status) {
-        return;
+        return null;
       }
       rowRevision = existing.configRevision;
       // A retry re-projects the ORIGINAL occurrence, not the retry moment.
@@ -1775,6 +1780,8 @@ export function createScheduleMethods(mongoose: typeof import('mongoose')): Sche
       { scheduleId: data.scheduleId, scheduledFor: data.scheduledFor },
       { $set: { bookkept: true } },
     );
+    // FORK: a retry of a recorded skip gets null (see ScheduleMethods).
+    return inserted;
   }
 
   async function setRunFireDetails(

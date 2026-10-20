@@ -334,6 +334,62 @@ describe('settledAt retention marker', () => {
   });
 });
 
+/** FORK: callers report each outcome once (Pendo `scheduled_run_completed`). */
+describe('settlement result', () => {
+  it('resolves to the run only for the call that settles it', async () => {
+    const schedule = await methods.createSchedule(scheduleData());
+    const when = new Date('2026-07-20T12:00:00Z');
+    await methods.reserveStartedRun(runData(schedule, { scheduledFor: when }));
+
+    await expect(
+      methods.recordRunOutcome({
+        scheduleId: schedule.id,
+        scheduledFor: when,
+        status: 'requires_action',
+        autoDisableAfterFailures: 5,
+      }),
+    ).resolves.toBeNull();
+    const settled = await methods.recordRunOutcome({
+      scheduleId: schedule.id,
+      scheduledFor: when,
+      status: 'success',
+      conversationId: 'convo-1',
+      autoDisableAfterFailures: 5,
+    });
+    await expect(
+      methods.recordRunOutcome({
+        scheduleId: schedule.id,
+        scheduledFor: when,
+        status: 'error',
+        autoDisableAfterFailures: 5,
+      }),
+    ).resolves.toBeNull();
+
+    expect(settled).toMatchObject({
+      scheduleId: schedule.id,
+      status: 'success',
+      conversationId: 'convo-1',
+    });
+    expect(settled?.settledAt).toBeInstanceOf(Date);
+  });
+
+  it('resolves to a skip only for the call that records it', async () => {
+    const schedule = await methods.createSchedule(scheduleData());
+    const skip = {
+      scheduleId: schedule.id,
+      user: schedule.user,
+      scheduledFor: new Date('2026-07-20T12:00:00Z'),
+      status: 'skipped_overlap' as const,
+    };
+
+    expect(await methods.recordSkippedRun(skip, 5)).toMatchObject({
+      scheduleId: schedule.id,
+      status: 'skipped_overlap',
+    });
+    await expect(methods.recordSkippedRun(skip, 5)).resolves.toBeNull();
+  });
+});
+
 describe('reserveStartedRun (single-active overlap guard)', () => {
   it('reserves the slot, then rejects a concurrent occurrence as overlap', async () => {
     const schedule = await methods.createSchedule(scheduleData());
