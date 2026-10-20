@@ -1,6 +1,13 @@
-import { ContentTypes, ToolCallTypes } from 'librechat-data-provider';
-import type { TPayload, ChatFinalFrame } from 'librechat-data-provider';
-import { AGENT_ID, trackFeedback, trackReply, trackTurn } from '../track';
+import { ContentTypes, EModelEndpoint, ToolCallTypes } from 'librechat-data-provider';
+import type { TPayload, ChatEvent, ChatFinalFrame } from 'librechat-data-provider';
+import {
+  AGENT_ID,
+  ASSISTANTS_AGENT_ID,
+  trackAssistantRun,
+  trackFeedback,
+  trackReply,
+  trackTurn,
+} from '../track';
 import logger from '~/utils/logger';
 
 const trackAgent = jest.fn();
@@ -191,12 +198,129 @@ describe('trackFeedback', () => {
     ]);
   });
 
-  it('reports nothing for a cleared or re-saved rating, or an Assistants reply', () => {
+  it("reports an Assistants reply's rating as the Assistants agent's", () => {
+    trackFeedback({ ...message, endpoint: EModelEndpoint.assistants }, undefined, 'thumbsDown');
+
+    expect(trackAgent).toHaveBeenCalledWith('user_reaction', {
+      agentId: ASSISTANTS_AGENT_ID,
+      conversationId: 'convo-1',
+      messageId: 'resp-1',
+      content: 'negative',
+    });
+  });
+
+  it('reports nothing for a cleared or re-saved rating, or an Azure Assistants reply', () => {
     trackFeedback(message, 'thumbsUp', undefined);
     trackFeedback(message, 'thumbsDown', 'thumbsDown');
-    trackFeedback({ ...message, endpoint: 'assistants' }, undefined, 'thumbsUp');
+    trackFeedback({ ...message, endpoint: EModelEndpoint.azureAssistants }, undefined, 'thumbsUp');
 
     expect(trackAgent).not.toHaveBeenCalled();
+  });
+});
+
+describe('trackAssistantRun', () => {
+  const payload = buildPayload({
+    conversationId: null,
+    endpoint: EModelEndpoint.assistants,
+    model: 'gpt-4o',
+  });
+
+  /** The route saves the turn under ids of its own and names them here. */
+  const sync: ChatEvent = {
+    type: 'sync',
+    data: {
+      sync: true,
+      conversationId: 'convo-1',
+      requestMessage: { messageId: 'user-1', conversationId: 'convo-1', text: 'What is 2 + 2?' },
+      responseMessage: { messageId: 'resp-1', conversationId: 'convo-1' },
+    },
+  };
+
+  const reply = { messageId: 'resp-1', conversationId: 'convo-1', thread_id: 'thread-1' };
+
+  /** Each frame replaces the part at its index: running text, then the annotated text. */
+  const streamed: ChatEvent[] = [
+    {
+      type: 'content',
+      data: {
+        ...reply,
+        index: 0,
+        type: ContentTypes.TOOL_CALL,
+        tool_call: {
+          id: 'call-1',
+          type: 'code_interpreter',
+          code_interpreter: { input: 'print(2 + 2)', outputs: [] },
+          progress: 1,
+        },
+      },
+    },
+    {
+      type: 'content',
+      data: {
+        ...reply,
+        index: 1,
+        type: ContentTypes.TOOL_CALL,
+        tool_call: {
+          id: 'call-2',
+          type: 'function',
+          function: { name: 'lookup', arguments: '{}', output: '4' },
+          progress: 1,
+        },
+      },
+    },
+    { type: 'content', data: { ...reply, index: 2, type: ContentTypes.TEXT, text: 'It is' } },
+    {
+      type: 'content',
+      data: { ...reply, index: 2, type: ContentTypes.TEXT, text: { value: 'It is 4.' } },
+    },
+  ];
+
+  const final: ChatEvent = {
+    type: 'final',
+    data: {
+      final: true,
+      conversation: { conversationId: 'convo-1' },
+      requestMessage: { thread_id: 'thread-1' },
+    },
+  };
+
+  it('reports the admitted prompt under the ids the route saved it with', () => {
+    trackAssistantRun({ ...payload, files: [{ file_id: 'file-1' }] })(sync);
+
+    expect(trackAgent).toHaveBeenCalledWith('prompt', {
+      agentId: ASSISTANTS_AGENT_ID,
+      conversationId: 'convo-1',
+      messageId: 'user-1',
+      content: 'What is 2 + 2?',
+      fileUploaded: true,
+    });
+  });
+
+  it('reports the streamed reply once the run completes, and each event once', () => {
+    const observe = trackAssistantRun(payload);
+    [sync, sync, ...streamed, final, final].forEach(observe);
+
+    expect(trackAgent.mock.calls.map(([type]) => type)).toEqual(['prompt', 'agent_response']);
+    expect(trackAgent).toHaveBeenLastCalledWith('agent_response', {
+      agentId: ASSISTANTS_AGENT_ID,
+      conversationId: 'convo-1',
+      messageId: 'resp-1',
+      content: 'It is 4.',
+      modelUsed: 'gpt-4o',
+      toolsUsed: ['code_interpreter', 'lookup'],
+    });
+  });
+
+  it('reports no reply for a failed run', () => {
+    const observe = trackAssistantRun(payload);
+    [sync, ...streamed].forEach(observe);
+    observe({
+      type: 'final',
+      data: { final: true, conversation: { conversationId: 'convo-1' }, runMessages: [] },
+    });
+
+    expect(trackAgent).toHaveBeenCalledTimes(1);
+    expect(trackAgent).toHaveBeenCalledWith('prompt', expect.anything());
   });
 });
 

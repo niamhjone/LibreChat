@@ -2,6 +2,7 @@ import { v4 } from 'uuid';
 import {
   ContentTypes,
   getSpeechText,
+  EModelEndpoint,
   isAgentsEndpoint,
   isAssistantsEndpoint,
   isUserInitiatedCompaction,
@@ -9,6 +10,8 @@ import {
 import type {
   TPayload,
   TMessage,
+  ChatEvent,
+  ChatSyncFrame,
   ChatFinalFrame,
   TFeedbackRating,
   TMessageContentParts,
@@ -19,7 +22,13 @@ import logger from '~/utils/logger';
  * The Pendo agent for `api/server/controllers/agents/client.js`, which runs every turn the
  * agents chat route admits: saved agents, and the ephemeral agent behind each model endpoint.
  */
-export const AGENT_ID = '4rLlQoGaNR786o-7Ief2BCJ12tI';
+export const AGENT_ID = '84uDFtS3YTEbWBjUIwHcEvoBdm0';
+
+/**
+ * The Pendo agent for `api/server/controllers/assistants/chatV2.js`, which runs every turn of the
+ * Assistants endpoint. Azure Assistants post to the v1 route instead, which no agent covers.
+ */
+export const ASSISTANTS_AGENT_ID = 'EReZmzcN5riv9HJbIFU60pwxbg4';
 
 type AgentEventType = 'prompt' | 'agent_response' | 'user_reaction';
 
@@ -36,9 +45,17 @@ type AgentMetadata = {
   fileUploaded?: boolean;
 };
 
-type AgentEvent = Omit<AgentMetadata, 'agentId'> & { type: AgentEventType };
+type AgentEvent = AgentMetadata & { type: AgentEventType };
 
 type ToolCall = Extract<TMessageContentParts, { type: ContentTypes.TOOL_CALL }>['tool_call'];
+
+/** The reply an Assistants run streams. Its FINAL frame carries none, so the reply is built the
+ *  way the chat view builds it: each content frame replaces the part at its index. */
+type AssistantReply = {
+  conversationId: string;
+  messageId: string;
+  content: TMessageContentParts[];
+};
 
 declare global {
   /** Set by the Pendo snippet, when the deployment installs it. A global variable rather than a
@@ -103,6 +120,7 @@ function describeTurn(payload: TPayload, conversationId: string): AgentEvent | n
   if (payload.isRegenerate !== true) {
     return {
       type: 'prompt',
+      agentId: AGENT_ID,
       conversationId,
       messageId: payload.messageId ?? v4(),
       content: payload.text ?? '',
@@ -111,7 +129,9 @@ function describeTurn(payload: TPayload, conversationId: string): AgentEvent | n
   }
   /** A regeneration names the reply it replaces by that reply's id plus a trailing `_`. */
   const messageId = payload.responseMessageId?.replace(/_+$/, '');
-  return messageId ? { type: 'user_reaction', conversationId, messageId, content: 'retry' } : null;
+  return messageId
+    ? { type: 'user_reaction', agentId: AGENT_ID, conversationId, messageId, content: 'retry' }
+    : null;
 }
 
 function describeReply(frame: ChatFinalFrame): AgentEvent | null {
@@ -132,6 +152,7 @@ function describeReply(frame: ChatFinalFrame): AgentEvent | null {
   }
   return {
     type: 'agent_response',
+    agentId: AGENT_ID,
     conversationId,
     messageId: message.messageId,
     content: getSpeechText(message),
@@ -140,26 +161,75 @@ function describeReply(frame: ChatFinalFrame): AgentEvent | null {
   };
 }
 
+/** The agent behind a reply, by the endpoint that served it: the Assistants endpoint posts to the
+ *  Assistants agent's route, Azure Assistants to the v1 route no agent covers, and every other
+ *  endpoint to the agents route. */
+function getReplyAgentId(endpoint: TMessage['endpoint']): string | null {
+  if (endpoint === EModelEndpoint.assistants) {
+    return ASSISTANTS_AGENT_ID;
+  }
+  return isAssistantsEndpoint(endpoint) ? null : AGENT_ID;
+}
+
 function describeFeedback(
   message: Pick<TMessage, 'messageId' | 'conversationId' | 'endpoint'> | undefined,
   previous: TFeedbackRating | undefined,
   next: TFeedbackRating | undefined,
 ): AgentEvent | null {
-  /** Clearing a rating, or saving the text of one already set, is not a new reaction; and an
-   *  Assistants reply comes from the Assistants API, not this agent. */
-  if (
-    next == null ||
-    next === previous ||
-    message?.conversationId == null ||
-    isAssistantsEndpoint(message.endpoint)
-  ) {
+  /** Clearing a rating, or saving the text of one already set, is not a new reaction. */
+  if (next == null || next === previous || message?.conversationId == null) {
+    return null;
+  }
+  const agentId = getReplyAgentId(message.endpoint);
+  if (agentId == null) {
     return null;
   }
   return {
     type: 'user_reaction',
+    agentId,
     conversationId: message.conversationId,
     messageId: message.messageId,
     content: RATING_REACTIONS[next],
+  };
+}
+
+/** The turn an Assistants run admitted. The route saves the user message under an id of its own,
+ *  which the `sync` frame names along with the conversation, new or not. */
+function describeAssistantTurn(payload: TPayload, frame: ChatSyncFrame): AgentEvent | null {
+  const conversationId = frame.conversationId ?? frame.requestMessage?.conversationId;
+  const messageId = frame.requestMessage?.messageId;
+  if (conversationId == null || messageId == null) {
+    return null;
+  }
+  return {
+    type: 'prompt',
+    agentId: ASSISTANTS_AGENT_ID,
+    conversationId,
+    messageId,
+    content: payload.text ?? '',
+    fileUploaded: (payload.files?.length ?? 0) > 0,
+  };
+}
+
+function describeAssistantReply(
+  payload: TPayload,
+  reply: AssistantReply,
+  frame: ChatFinalFrame,
+): AgentEvent | null {
+  /** A failed run ends on the error handler's FINAL frame, which carries the thread's messages
+   *  in place of a reply. */
+  if (frame.runMessages != null || frame.error != null) {
+    return null;
+  }
+  return {
+    type: 'agent_response',
+    agentId: ASSISTANTS_AGENT_ID,
+    conversationId: reply.conversationId,
+    messageId: reply.messageId,
+    content: getSpeechText({ content: reply.content }),
+    /** The run overrides the assistant's model with the one the request names. */
+    modelUsed: payload.model ?? undefined,
+    toolsUsed: getToolNames(reply.content),
   };
 }
 
@@ -172,7 +242,7 @@ function report(describe: () => AgentEvent | null): void {
       return;
     }
     const { type, ...metadata } = event;
-    globalThis.pendo?.trackAgent?.(type, { agentId: AGENT_ID, ...metadata });
+    globalThis.pendo?.trackAgent?.(type, metadata);
   } catch (error) {
     logger.warn('pendo', 'Failed to track an agent event', error);
   }
@@ -196,4 +266,38 @@ export function trackFeedback(
   next: TFeedbackRating | undefined,
 ): void {
   report(() => describeFeedback(message, previous, next));
+}
+
+/**
+ * Follows one Assistants run through its stream: reports the prompt once the route admits the
+ * turn, and the reply once the run completes. A stopped run reports no reply: its stream closes
+ * without a FINAL frame, because the abort route answers instead.
+ */
+export function trackAssistantRun(payload: TPayload): (event: ChatEvent) => void {
+  let admitted = false;
+  let reply: AssistantReply | null = null;
+
+  const observe = (event: ChatEvent): AgentEvent | null => {
+    if (event.type === 'sync' && !admitted) {
+      admitted = true;
+      const prompt = describeAssistantTurn(payload, event.data);
+      const messageId = event.data.responseMessage?.messageId;
+      if (prompt != null && messageId != null) {
+        reply = { conversationId: prompt.conversationId, messageId, content: [] };
+      }
+      return prompt;
+    }
+    if (event.type === 'content' && event.data.messageId === reply?.messageId) {
+      reply.content[event.data.index] = event.data;
+      return null;
+    }
+    if (event.type === 'final' && reply != null) {
+      const finished = reply;
+      reply = null;
+      return describeAssistantReply(payload, finished, event.data);
+    }
+    return null;
+  };
+
+  return (event) => report(() => observe(event));
 }

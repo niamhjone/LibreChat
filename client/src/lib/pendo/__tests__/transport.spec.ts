@@ -1,8 +1,8 @@
-import { ContentTypes } from 'librechat-data-provider';
+import { ContentTypes, EModelEndpoint, EndpointURLs } from 'librechat-data-provider';
 import type { ChatEvent, ChatTransportOptions, TPayload } from 'librechat-data-provider';
 import type { Transport } from '~/hooks/Chat/contract';
+import { AGENT_ID, ASSISTANTS_AGENT_ID } from '../track';
 import { withAgentTracking } from '../transport';
-import { AGENT_ID } from '../track';
 
 const trackAgent = jest.fn();
 
@@ -117,11 +117,57 @@ describe('withAgentTracking', () => {
     );
   });
 
-  it('passes Assistants runs through untouched', () => {
+  it('reports an Assistants run, and hands every event on', () => {
+    const { transport, send } = createTransport();
+    const onEvent = jest.fn();
+    const reply = { messageId: 'resp-1', conversationId: 'convo-1', thread_id: 'thread-1' };
+    const events: ChatEvent[] = [
+      { type: 'open' },
+      {
+        type: 'sync',
+        data: {
+          sync: true,
+          conversationId: 'convo-1',
+          requestMessage: { messageId: 'user-1', conversationId: 'convo-1' },
+          responseMessage: reply,
+        },
+      },
+      { type: 'content', data: { ...reply, index: 0, type: ContentTypes.TEXT, text: 'Hi!' } },
+      { type: 'final', data: { final: true, conversation: { conversationId: 'convo-1' } } },
+    ];
+
+    withAgentTracking(transport)
+      .stream({ token: 'token' })
+      .send(
+        {
+          server: EndpointURLs[EModelEndpoint.assistants],
+          payload: { ...request.payload, endpoint: EModelEndpoint.assistants, model: 'gpt-4o' },
+        },
+        { signal: new AbortController().signal, onEvent },
+      );
+    events.forEach((event) => send.mock.calls[0][1].onEvent(event));
+
+    expect(onEvent.mock.calls).toEqual(events.map((event) => [event]));
+    expect(trackAgent.mock.calls).toEqual([
+      ['prompt', expect.objectContaining({ agentId: ASSISTANTS_AGENT_ID, messageId: 'user-1' })],
+      [
+        'agent_response',
+        expect.objectContaining({
+          agentId: ASSISTANTS_AGENT_ID,
+          messageId: 'resp-1',
+          content: 'Hi!',
+          modelUsed: 'gpt-4o',
+        }),
+      ],
+    ]);
+  });
+
+  it('passes Azure Assistants runs through untouched', () => {
     const { transport, send } = createTransport();
     const options = { signal: new AbortController().signal, onEvent: jest.fn() };
+    const azureRequest = { ...request, server: EndpointURLs[EModelEndpoint.azureAssistants] };
 
-    withAgentTracking(transport).stream({ token: 'token' }).send(request, options);
+    withAgentTracking(transport).stream({ token: 'token' }).send(azureRequest, options);
 
     expect(send).toHaveBeenCalledTimes(1);
     expect(send.mock.calls[0][1]).toBe(options);
